@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""Fcitx 5 Python 后端服务（语音 + Rime）
+
+此服务作为独立进程运行，通过 Unix Socket 接收来自 C++ Addon 的请求，
+提供语音识别和 Rime 拼音输入功能。
+"""
+from __future__ import annotations
+
+import sys
+import os
+import json
+import socket
+import logging
+import signal
+from pathlib import Path
+
+# 添加项目根目录到 path
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.funasr_server import FunASRServer
+from backend.rime_handler import RimeHandler
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stderr),
+    ]
+)
+logger = logging.getLogger(__name__)
+
+SOCKET_PATH = "/tmp/vocotype-fcitx5.sock"
+
+
+class Fcitx5Backend:
+    """Fcitx 5 Python 后端服务
+
+    职责：
+    1. 接收语音识别请求，调用 FunASRServer
+    2. 接收 Rime 按键请求，调用 RimeHandler
+    3. 通过 IPC 返回结果给 C++ Addon
+    """
+
+    def __init__(self):
+        # 语音识别服务
+        logger.info("正在初始化 FunASR 服务器...")
+        self.asr_server = FunASRServer()
+        asr_result = self.asr_server.initialize()
+        if not asr_result['success']:
+            logger.error("FunASR 初始化失败: %s", asr_result.get('error'))
+            sys.exit(1)
+        logger.info("FunASR 服务器初始化成功")
+
+        # Rime 处理器
+        self.rime_handler = RimeHandler()
+        if self.rime_handler.available:
+            logger.info("Rime 集成已启用")
+        else:
+            logger.info("Rime 集成未启用（纯语音模式）")
+
+        # 标记运行状态
+        self.running = True
+
+        # 注册信号处理
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """信号处理器"""
+        logger.info("收到信号 %d，准备退出...", signum)
+        self.running = False
+
+    def run(self):
+        """运行 IPC 服务器"""
+        # 删除旧的 socket 文件
+        if os.path.exists(SOCKET_PATH):
+            os.remove(SOCKET_PATH)
+
+        # 创建 Unix Socket
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(SOCKET_PATH)
+        sock.listen(5)
+        sock.settimeout(1.0)  # 设置超时以便处理信号
+
+        logger.info("Fcitx5 Backend 已启动，监听: %s", SOCKET_PATH)
+
+        try:
+            while self.running:
+                try:
+                    conn, _ = sock.accept()
+                    self.handle_client(conn)
+                except socket.timeout:
+                    continue
+                except Exception as exc:
+                    if self.running:
+                        logger.error("接受连接失败: %s", exc)
+        finally:
+            sock.close()
+            if os.path.exists(SOCKET_PATH):
+                os.remove(SOCKET_PATH)
+            logger.info("Fcitx5 Backend 已停止")
+
+    def handle_client(self, conn: socket.socket):
+        """处理客户端请求
+
+        IPC 协议：
+        - 请求格式：JSON 字符串
+        - 响应格式：JSON 字符串
+
+        请求类型：
+        1. transcribe: 语音识别
+           {"type": "transcribe", "audio_path": "/tmp/xxx.wav"}
+           -> {"success": true, "text": "识别结果"}
+
+        2. key_event: Rime 按键处理
+           {"type": "key_event", "keyval": 97, "mask": 0}
+           -> {"handled": true, "commit": "...", "preedit": {...}, ...}
+
+        3. reset: 重置 Rime 状态
+           {"type": "reset"}
+           -> {"success": true}
+
+        4. ping: 健康检查
+           {"type": "ping"}
+           -> {"pong": true}
+        """
+        try:
+            # 接收请求（读到 EOF）
+            chunks = []
+            while True:
+                chunk = conn.recv(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            if not chunks:
+                return
+            data = b''.join(chunks).decode('utf-8')
+
+            request = json.loads(data)
+            req_type = request.get('type')
+
+            logger.debug("收到请求: type=%s", req_type)
+
+            # 处理请求
+            if req_type == 'transcribe':
+                # 语音识别
+                audio_path = request.get('audio_path')
+                if not audio_path:
+                    response = {"success": False, "error": "缺少 audio_path 参数"}
+                else:
+                    result = self.asr_server.transcribe_audio(audio_path)
+                    response = result
+
+            elif req_type == 'key_event':
+                # Rime 按键处理
+                keyval = request.get('keyval')
+                mask = request.get('mask', 0)
+                if keyval is None:
+                    response = {"handled": False, "error": "缺少 keyval 参数"}
+                else:
+                    result = self.rime_handler.process_key(keyval, mask)
+                    response = result
+
+            elif req_type == 'reset':
+                # 重置 Rime
+                self.rime_handler.reset()
+                response = {"success": True}
+
+            elif req_type == 'ping':
+                # 健康检查
+                response = {"pong": True}
+
+            else:
+                response = {"error": f"未知的请求类型: {req_type}"}
+
+            # 发送响应
+            response_str = json.dumps(response, ensure_ascii=False)
+            conn.sendall(response_str.encode('utf-8'))
+
+            logger.debug("已发送响应: %d 字节", len(response_str))
+
+        except json.JSONDecodeError as exc:
+            logger.error("JSON 解析失败: %s", exc)
+            error_response = json.dumps({"error": "Invalid JSON"})
+            conn.sendall(error_response.encode('utf-8'))
+
+        except Exception as exc:
+            logger.error("处理请求失败: %s", exc)
+            import traceback
+            traceback.print_exc()
+            error_response = json.dumps({"error": str(exc)})
+            conn.sendall(error_response.encode('utf-8'))
+
+        finally:
+            conn.close()
+
+    def cleanup(self):
+        """清理资源"""
+        logger.info("正在清理资源...")
+        try:
+            self.asr_server.cleanup()
+            self.rime_handler.cleanup()
+        except Exception as exc:
+            logger.error("清理资源失败: %s", exc)
+
+
+def main():
+    """主入口"""
+    global SOCKET_PATH
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description='VoCoType Fcitx5 Backend Server'
+    )
+    parser.add_argument(
+        '--socket',
+        default=SOCKET_PATH,
+        help=f'Unix socket path (default: {SOCKET_PATH})'
+    )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug logging'
+    )
+    args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    SOCKET_PATH = args.socket
+
+    backend = Fcitx5Backend()
+    try:
+        backend.run()
+    except KeyboardInterrupt:
+        logger.info("收到 Ctrl+C，退出...")
+    finally:
+        backend.cleanup()
+
+
+if __name__ == '__main__':
+    main()

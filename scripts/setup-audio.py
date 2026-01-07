@@ -61,11 +61,15 @@ def display_devices(devices: list[tuple[int, dict]]) -> None:
         print()
 
 
-def select_device(devices: list[tuple[int, dict]]) -> tuple[int, int]:
-    """让用户选择设备，返回 (设备ID, 采样率)"""
+def select_device(devices: list[tuple[int, dict]]) -> tuple[int, int] | None:
+    """让用户选择设备，返回 (设备ID, 采样率) 或 None 表示退出"""
     while True:
         try:
-            choice = input("请输入设备编号: ").strip()
+            choice = input("请输入设备编号 (q=退出): ").strip().lower()
+
+            if choice in ('q', 'quit', 'exit'):
+                return None
+
             device_id = int(choice)
 
             # 检查是否在可用列表中
@@ -77,10 +81,10 @@ def select_device(devices: list[tuple[int, dict]]) -> tuple[int, int]:
 
             print(f"❌ 设备 {device_id} 不是有效的输入设备，请重新选择")
         except ValueError:
-            print("❌ 请输入有效的数字")
+            print("❌ 请输入有效的数字或 'q' 退出")
         except KeyboardInterrupt:
             print("\n\n用户取消")
-            sys.exit(0)
+            sys.exit(1)
 
 
 def record_test_audio(device_id: int, sample_rate: int) -> np.ndarray:
@@ -304,7 +308,13 @@ def main():
     while True:
         # 2. 显示并选择设备
         display_devices(devices)
-        device_id, sample_rate = select_device(devices)
+        result = select_device(devices)
+
+        if result is None:
+            print("\n⚠️  音频配置未完成，退出。")
+            sys.exit(1)
+
+        device_id, sample_rate = result
 
         # 录音-播放-ASR测试循环
         while True:
@@ -312,9 +322,12 @@ def main():
             audio_data = record_test_audio(device_id, sample_rate)
 
             if audio_data is None:
-                retry = input("\n录音失败，是否重试? (y/n): ").strip().lower()
+                retry = input("\n录音失败，是否重试? (y/n/q=退出): ").strip().lower()
                 if retry in ('y', 'yes', '是'):
                     continue
+                elif retry in ('q', 'quit', 'exit'):
+                    print("\n⚠️  音频配置未完成，退出。")
+                    sys.exit(1)
                 else:
                     print("返回设备选择...")
                     break
@@ -323,8 +336,23 @@ def main():
             can_hear = playback_test(audio_data, sample_rate)
 
             if not can_hear:
-                # 重新选择设备
-                break
+                # 询问下一步操作
+                print("\n选择操作:")
+                print("  1. 重新选择设备")
+                print("  2. 跳过音频配置（稍后手动配置）")
+                print("  3. 退出安装")
+                choice = input("请选择 (1/2/3): ").strip()
+
+                if choice == '2':
+                    print("\n⚠️  跳过音频配置。")
+                    print("请稍后运行 'python scripts/setup-audio.py' 重新配置。")
+                    sys.exit(0)  # 跳过但不报错
+                elif choice == '3':
+                    print("\n音频配置未完成，退出。")
+                    sys.exit(1)
+                else:
+                    # 重新选择设备
+                    break
 
             # 5. ASR 识别测试
             asr_success = test_asr_recognition(audio_data, sample_rate)
@@ -339,9 +367,12 @@ def main():
                 return
             else:
                 # ASR 失败，询问是否重新录音
-                retry = input("\n识别失败，是否重新录音测试? (y/n): ").strip().lower()
+                retry = input("\n识别失败，是否重新录音测试? (y/n/q=退出): ").strip().lower()
                 if retry in ('y', 'yes', '是'):
                     continue  # 重新录音
+                elif retry in ('q', 'quit', 'exit'):
+                    print("\n⚠️  音频配置未完成，退出。")
+                    sys.exit(1)
                 else:
                     change = input("是否更换设备? (y/n): ").strip().lower()
                     if change in ('y', 'yes', '是'):
@@ -356,4 +387,4 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\n\n用户取消配置")
-        sys.exit(0)
+        sys.exit(1)
