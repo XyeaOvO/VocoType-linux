@@ -7,6 +7,37 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# 检测可用的 Python 版本（需要 3.10-3.12，onnxruntime 不支持 3.13+）
+detect_python() {
+    for py in python3.12 python3.11 python3.10 python3; do
+        if command -v "$py" &>/dev/null; then
+            py_version=$("$py" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+            major=$(echo "$py_version" | cut -d. -f1)
+            minor=$(echo "$py_version" | cut -d. -f2)
+            if [ "$major" -eq 3 ] && [ "$minor" -ge 10 ] && [ "$minor" -le 12 ]; then
+                echo "$py"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+PYTHON_CMD=$(detect_python) || {
+    echo "错误: 需要 Python 3.10-3.12"
+    echo ""
+    echo "原因: VoCoType 使用 onnxruntime 运行语音识别模型，"
+    echo "      而 onnxruntime 官方尚未支持 Python 3.13+。"
+    echo "      参考: https://github.com/microsoft/onnxruntime/issues/21292"
+    echo ""
+    echo "请安装 Python 3.12:"
+    echo "  Fedora: sudo dnf install python3.12"
+    echo "  Ubuntu: sudo apt install python3.12"
+    echo "  Arch:   sudo pacman -S python312"
+    exit 1
+}
+echo "检测到兼容的 Python: $PYTHON_CMD"
+
 # 用户级安装路径
 INSTALL_DIR="$HOME/.local/share/vocotype"
 COMPONENT_DIR="$HOME/.local/share/ibus/component"
@@ -134,15 +165,11 @@ mkdir -p "$LIBEXEC_DIR"
 
 if [ "$USE_SYSTEM_PYTHON" != "1" ] && [ ! -x "$PYTHON" ]; then
     VENV_DIR="$(dirname "$PYTHON")/.."
-    echo "创建虚拟环境: $VENV_DIR"
+    echo "创建虚拟环境: $VENV_DIR (使用 $PYTHON_CMD)"
     if command -v uv >/dev/null 2>&1; then
-        uv venv --python python3 "$VENV_DIR"
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 -m venv "$VENV_DIR"
+        uv venv --python "$PYTHON_CMD" "$VENV_DIR"
     else
-        echo "未找到 uv 或 python3，无法创建虚拟环境。"
-        echo "请先安装 uv 或 python3，再重新运行安装脚本。"
-        exit 1
+        "$PYTHON_CMD" -m venv "$VENV_DIR"
     fi
 fi
 

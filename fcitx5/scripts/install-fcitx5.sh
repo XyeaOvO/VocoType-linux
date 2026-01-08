@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PROJECT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
 INSTALL_DIR="$HOME/.local/share/vocotype-fcitx5"
 SCRIPT_DIR="$PROJECT_DIR/scripts"
 
@@ -229,10 +229,16 @@ for py in python3.12 python3.11 python3.10 python3; do
 done
 
 if [ -z "$PYTHON_CMD" ]; then
-    echo "错误: 需要 Python 3.10-3.12（onnxruntime 不支持更高版本）"
-    echo "请安装 Python 3.12: "
+    echo "错误: 需要 Python 3.10-3.12"
+    echo ""
+    echo "原因: VoCoType 使用 onnxruntime 运行语音识别模型，"
+    echo "      而 onnxruntime 官方尚未支持 Python 3.13+。"
+    echo "      参考: https://github.com/microsoft/onnxruntime/issues/21292"
+    echo ""
+    echo "请安装 Python 3.12:"
     echo "  Fedora: sudo dnf install python3.12"
     echo "  Ubuntu: sudo apt install python3.12"
+    echo "  Arch:   sudo pacman -S python312"
     exit 1
 fi
 
