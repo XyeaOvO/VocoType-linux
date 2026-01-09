@@ -229,7 +229,7 @@ case "$PY_CHOICE" in
 esac
 
 # 1. 创建目录
-echo "[0/5] 创建安装目录与 Python 环境..."
+echo "[1/6] 创建安装目录与 Python 环境..."
 mkdir -p "$INSTALL_DIR"
 mkdir -p "$COMPONENT_DIR"
 mkdir -p "$LIBEXEC_DIR"
@@ -308,11 +308,185 @@ else
                 ENABLE_RIME=0
             fi
         fi
+
+        # pyrime 安装成功后，进行 schema 选择
+        if [ "$ENABLE_RIME" = "1" ]; then
+            echo ""
+            echo "══════════════════════════════════════════"
+            echo "   RIME 输入方案配置"
+            echo "══════════════════════════════════════════"
+            echo ""
+
+            # 扫描可用的 schema
+            SHARED_RIME_DATA="/usr/share/rime-data"
+            IBUS_RIME_USER="$HOME/.config/ibus/rime"
+            declare -a SCHEMAS=()
+            declare -A SCHEMA_NAMES=()
+
+            # 常见 schema 的中文名称
+            SCHEMA_NAMES["luna_pinyin"]="朙月拼音"
+            SCHEMA_NAMES["luna_pinyin_simp"]="朙月拼音·简化字"
+            SCHEMA_NAMES["luna_pinyin_tw"]="朙月拼音·臺灣正體"
+            SCHEMA_NAMES["double_pinyin"]="自然码双拼"
+            SCHEMA_NAMES["double_pinyin_abc"]="智能ABC双拼"
+            SCHEMA_NAMES["double_pinyin_flypy"]="小鹤双拼"
+            SCHEMA_NAMES["double_pinyin_mspy"]="微软双拼"
+            SCHEMA_NAMES["double_pinyin_pyjj"]="拼音加加双拼"
+            SCHEMA_NAMES["rime_ice"]="雾凇拼音"
+            SCHEMA_NAMES["wubi86"]="五笔86"
+            SCHEMA_NAMES["wubi98"]="五笔98"
+            SCHEMA_NAMES["wubi_pinyin"]="五笔拼音混输"
+            SCHEMA_NAMES["pinyin_simp"]="袖珍简化字拼音"
+            SCHEMA_NAMES["terra_pinyin"]="地球拼音"
+            SCHEMA_NAMES["bopomofo"]="注音"
+            SCHEMA_NAMES["bopomofo_tw"]="注音·臺灣正體"
+            SCHEMA_NAMES["bopomofo_express"]="注音·快打"
+            SCHEMA_NAMES["cangjie5"]="仓颉五代"
+            SCHEMA_NAMES["cangjie5_express"]="仓颉五代·快打"
+            SCHEMA_NAMES["quick5"]="速成"
+            SCHEMA_NAMES["stroke"]="五笔画"
+            SCHEMA_NAMES["array30"]="行列30"
+            SCHEMA_NAMES["combo_pinyin"]="宫保拼音"
+            SCHEMA_NAMES["combo_pinyin_kbcon"]="宫保拼音·键盘控"
+            SCHEMA_NAMES["combo_pinyin_left"]="宫保拼音·左手"
+            SCHEMA_NAMES["stenotype"]="打字速记"
+            SCHEMA_NAMES["jyutping"]="粤拼"
+            SCHEMA_NAMES["ipa_xsampa"]="国际音标"
+            SCHEMA_NAMES["emoji"]="绘文字"
+            SCHEMA_NAMES["stroke_simp"]="笔顺·简化字"
+            SCHEMA_NAMES["triungkox"]="中古汉语三拼"
+
+            # 扫描 schema 文件
+            scan_schemas() {
+                local dir="$1"
+                if [ -d "$dir" ]; then
+                    for f in "$dir"/*.schema.yaml; do
+                        if [ -f "$f" ]; then
+                            local schema_id=$(basename "$f" .schema.yaml)
+                            # 检查是否已添加
+                            local found=0
+                            for s in "${SCHEMAS[@]}"; do
+                                if [ "$s" = "$schema_id" ]; then
+                                    found=1
+                                    break
+                                fi
+                            done
+                            if [ $found -eq 0 ]; then
+                                SCHEMAS+=("$schema_id")
+                            fi
+                        fi
+                    done
+                fi
+            }
+
+            scan_schemas "$SHARED_RIME_DATA"
+            scan_schemas "$IBUS_RIME_USER"
+
+            if [ ${#SCHEMAS[@]} -gt 0 ]; then
+                # 优先显示 luna_pinyin
+                MENU_SCHEMAS=()
+                if [[ " ${SCHEMAS[*]} " =~ " luna_pinyin " ]]; then
+                    MENU_SCHEMAS+=("luna_pinyin")
+                fi
+                for s in "${SCHEMAS[@]}"; do
+                    if [ "$s" != "luna_pinyin" ]; then
+                        MENU_SCHEMAS+=("$s")
+                    fi
+                done
+
+                # 翻页显示
+                PAGE_SIZE=10
+                TOTAL=${#MENU_SCHEMAS[@]}
+                PAGE=0
+                TOTAL_PAGES=$(( (TOTAL + PAGE_SIZE - 1) / PAGE_SIZE ))
+
+                while true; do
+                    echo "检测到以下可用输入方案（第 $((PAGE + 1))/$TOTAL_PAGES 页，共 $TOTAL 个）："
+                    echo ""
+
+                    START=$((PAGE * PAGE_SIZE))
+                    END=$((START + PAGE_SIZE))
+                    if [ $END -gt $TOTAL ]; then
+                        END=$TOTAL
+                    fi
+
+                    count=0
+                    for ((i = START; i < END; i++)); do
+                        s="${MENU_SCHEMAS[$i]}"
+                        count=$((count + 1))
+                        display_num=$((i + 1))
+                        name="${SCHEMA_NAMES[$s]:-$s}"
+                        if [ "$s" = "luna_pinyin" ]; then
+                            echo "  [$display_num] $s - $name（推荐，librime 自带）"
+                        else
+                            echo "  [$display_num] $s - $name"
+                        fi
+                    done
+
+                    echo ""
+                    if [ $TOTAL_PAGES -gt 1 ]; then
+                        echo "  [n] 下一页  [p] 上一页"
+                    fi
+                    echo "  [0] 使用默认 luna_pinyin"
+                    echo ""
+
+                    read -r -p "请输入方案编号 (默认 1): " SCHEMA_CHOICE
+
+                    # 翻页处理
+                    if [ "$SCHEMA_CHOICE" = "n" ] || [ "$SCHEMA_CHOICE" = "N" ]; then
+                        if [ $((PAGE + 1)) -lt $TOTAL_PAGES ]; then
+                            PAGE=$((PAGE + 1))
+                            echo ""
+                            continue
+                        else
+                            echo "已是最后一页"
+                            echo ""
+                            continue
+                        fi
+                    elif [ "$SCHEMA_CHOICE" = "p" ] || [ "$SCHEMA_CHOICE" = "P" ]; then
+                        if [ $PAGE -gt 0 ]; then
+                            PAGE=$((PAGE - 1))
+                            echo ""
+                            continue
+                        else
+                            echo "已是第一页"
+                            echo ""
+                            continue
+                        fi
+                    fi
+
+                    # 选择处理
+                    if [ -z "$SCHEMA_CHOICE" ] || [ "$SCHEMA_CHOICE" = "1" ]; then
+                        SELECTED_SCHEMA="${MENU_SCHEMAS[0]}"
+                        break
+                    elif [ "$SCHEMA_CHOICE" = "0" ]; then
+                        SELECTED_SCHEMA="luna_pinyin"
+                        break
+                    elif [[ "$SCHEMA_CHOICE" =~ ^[0-9]+$ ]] && [ "$SCHEMA_CHOICE" -ge 1 ] && [ "$SCHEMA_CHOICE" -le $TOTAL ]; then
+                        idx=$((SCHEMA_CHOICE - 1))
+                        SELECTED_SCHEMA="${MENU_SCHEMAS[$idx]}"
+                        break
+                    else
+                        echo "无效选择，请重新输入"
+                        echo ""
+                        continue
+                    fi
+                done
+            else
+                echo "未检测到可用的输入方案，将使用默认方案 luna_pinyin"
+                SELECTED_SCHEMA="luna_pinyin"
+            fi
+
+            echo ""
+            echo "✓ 已选择输入方案: $SELECTED_SCHEMA"
+            echo "══════════════════════════════════════════"
+            echo ""
+        fi
     fi
 fi
 
-# 1. 音频设备配置
-echo "[1/5] 音频设备配置..."
+# 2. 音频设备配置
+echo "[2/6] 音频设备配置..."
 echo ""
 echo "首先需要配置您的麦克风设备。"
 echo "这个过程会："
@@ -331,14 +505,14 @@ fi
 
 echo ""
 
-# 2. 复制项目文件
-echo "[2/5] 复制项目文件..."
+# 3. 复制项目文件
+echo "[3/6] 复制项目文件..."
 cp -r "$PROJECT_DIR/app" "$INSTALL_DIR/"
 cp -r "$PROJECT_DIR/ibus" "$INSTALL_DIR/"
 cp "$PROJECT_DIR/vocotype_version.py" "$INSTALL_DIR/"
 
-# 3. 创建启动脚本
-echo "[3/5] 创建启动脚本..."
+# 4. 创建启动脚本
+echo "[4/6] 创建启动脚本..."
 cat > "$LIBEXEC_DIR/ibus-engine-vocotype" << 'LAUNCHER'
 #!/bin/bash
 # VoCoType IBus Engine Launcher
@@ -360,8 +534,43 @@ sed -i "s|VOCOTYPE_PROJECT_DIR|$PROJECT_DIR|g" "$LIBEXEC_DIR/ibus-engine-vocotyp
 sed -i "s|VOCOTYPE_PYTHON|$PYTHON|g" "$LIBEXEC_DIR/ibus-engine-vocotype"
 chmod +x "$LIBEXEC_DIR/ibus-engine-vocotype"
 
-# 4. 安装IBus组件文件
-echo "[4/5] 安装IBus组件配置..."
+# 5. 配置 Rime 集成（如果启用）
+if [ "$ENABLE_RIME" = "1" ]; then
+    echo "[5/6] 配置 Rime 集成..."
+
+    # 使用 ibus-rime 配置目录（保证 Rime 完整可用）
+    VOCOTYPE_RIME_CONFIG="$HOME/.config/vocotype/rime"
+    VOCOTYPE_RIME_LOG="$HOME/.local/share/vocotype/rime"
+    IBUS_RIME_DIR="$HOME/.config/ibus/rime"
+
+    mkdir -p "$VOCOTYPE_RIME_CONFIG"
+    mkdir -p "$VOCOTYPE_RIME_LOG"
+
+    if [ ! -f "$IBUS_RIME_DIR/default.yaml" ]; then
+        echo "⚠️  未检测到 ibus-rime 配置（$IBUS_RIME_DIR/default.yaml）"
+        echo "   Rime 可能无法正常工作，请先运行 ibus-rime 或完成部署"
+    fi
+
+    # 创建 user.yaml（仅用于记录用户选择的方案）
+    cat > "$VOCOTYPE_RIME_CONFIG/user.yaml" << EOF
+# VoCoType RIME 用户配置
+# 如需更换输入方案，请修改下面的 previously_selected_schema 值
+var:
+  previously_selected_schema: "$SELECTED_SCHEMA"
+EOF
+    echo "  创建配置文件: $VOCOTYPE_RIME_CONFIG/user.yaml"
+
+    echo ""
+    echo "✓ Rime 集成配置完成"
+    echo "  配置目录: $IBUS_RIME_DIR"
+    echo "  输入方案: $SELECTED_SCHEMA"
+    echo ""
+else
+    echo "[5/6] 跳过 Rime 配置（纯语音版）..."
+fi
+
+# 6. 安装IBus组件文件
+echo "[6/6] 安装IBus组件配置..."
 EXEC_PATH="$LIBEXEC_DIR/ibus-engine-vocotype"
 VOCOTYPE_VERSION="1.0.0"
 if VOCOTYPE_VERSION=$(PYTHONPATH="$PROJECT_DIR" "$PYTHON" - << 'PY'
@@ -378,8 +587,15 @@ fi
 SYSTEM_COMPONENT_DIR="/usr/share/ibus/component"
 USE_SYSTEM_COMPONENT=0
 
-if [ "$XDG_CURRENT_DESKTOP" = "GNOME" ] || [ -f /etc/debian_version ]; then
-    echo "检测到 GNOME/Debian 环境，IBus 组件将安装到系统目录"
+# 检测是否需要安装到系统目录：
+# 1. GNOME 桌面环境
+# 2. Debian 系统
+# 3. 检测 gnome-shell 进程或包（处理 su/sudo 会话中 XDG_CURRENT_DESKTOP 为空的情况）
+if [ "$XDG_CURRENT_DESKTOP" = "GNOME" ] || \
+   [ -f /etc/debian_version ] || \
+   pgrep -x gnome-shell >/dev/null 2>&1 || \
+   command -v gnome-shell >/dev/null 2>&1; then
+    echo "检测到 GNOME 环境，IBus 组件需要安装到系统目录"
     USE_SYSTEM_COMPONENT=1
 fi
 
@@ -392,12 +608,15 @@ if [ "$USE_SYSTEM_COMPONENT" = "1" ]; then
         echo "✓ IBus 组件已安装到 $SYSTEM_COMPONENT_DIR"
         rm -f "/tmp/vocotype.xml"
     else
-        echo "⚠️  无法安装到系统目录，尝试用户目录..."
-        mkdir -p "$COMPONENT_DIR"
-        mv "/tmp/vocotype.xml" "$COMPONENT_DIR/vocotype.xml"
-        echo "  已安装到 $COMPONENT_DIR"
-        echo "  注意：如果 IBus 找不到输入法，请手动执行："
-        echo "    sudo cp $COMPONENT_DIR/vocotype.xml $SYSTEM_COMPONENT_DIR/"
+        echo ""
+        echo "❌ 无法安装到系统目录（需要 sudo 权限）"
+        echo ""
+        echo "组件文件已保存到 /tmp/vocotype.xml"
+        echo "请使用有 sudo 权限的用户执行以下命令："
+        echo "  sudo cp /tmp/vocotype.xml $SYSTEM_COMPONENT_DIR/"
+        echo ""
+        echo "然后重新运行安装脚本完成剩余配置。"
+        exit 1
     fi
 else
     mkdir -p "$COMPONENT_DIR"
@@ -436,8 +655,8 @@ if [ "$ENABLE_RIME" = "1" ]; then
     echo ""
     echo "配置说明："
     echo "   - Rime 配置目录: ~/.config/ibus/rime/"
-    echo "   - 与 ibus-rime 共享词库和配置"
-    echo "   - 如需调整 Rime 设置，请编辑该目录下的 yaml 文件"
+    echo "   - 当前输入方案: $SELECTED_SCHEMA"
+    echo "   - 如需更换方案，请编辑 ~/.config/vocotype/rime/user.yaml"
 else
     echo "3. 使用方法（纯语音版）:"
     echo "   - 切换到VoCoType输入法"

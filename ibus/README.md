@@ -13,7 +13,7 @@ VoCoType 离线语音输入法的 IBus 版本实现。
 ## 系统要求
 
 - **Linux 发行版**: 支持 IBus 的任何发行版 (Fedora, Ubuntu, Debian, Arch 等)
-- **Python**: 3.12+
+- **Python**: 3.10-3.12（onnxruntime 暂不支持 3.13+）
 - **IBus**: 系统已安装并启用 IBus 输入法框架
 
 ### 可选依赖（完整版）
@@ -109,6 +109,9 @@ ibus restart
 - 与 ibus-rime 共享配置目录
 - 推荐使用 [rime-ice（雾凇拼音）](https://github.com/iDvel/rime-ice) 获得更好体验
 - 所有 Rime 自定义配置都适用
+
+> 提示：安装脚本会把选择的方案记录在 `~/.config/vocotype/rime/user.yaml`，
+> 启动时优先使用该方案。
 
 详见：[RIME_CONFIG_GUIDE.md](../RIME_CONFIG_GUIDE.md)
 

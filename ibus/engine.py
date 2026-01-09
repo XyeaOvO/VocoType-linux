@@ -47,6 +47,10 @@ class VoCoTypeEngine(IBus.Engine):
     # PTT触发键
     PTT_KEYVAL = IBus.KEY_F9
 
+    # 全局session跟踪（用于调试）
+    _active_sessions = set()
+    _session_lock = threading.Lock()
+
     def __init__(self, bus: IBus.Bus, object_path: str):
         # 需要显式传入 DBus 连接与 object_path，避免 GLib g_variant object_path 断言失败。
         super().__init__(connection=bus.get_connection(), object_path=object_path)
@@ -139,6 +143,43 @@ class VoCoTypeEngine(IBus.Engine):
 
         return preferred or SAMPLE_RATE
 
+    def _read_schema_from_yaml(self, user_yaml: Path) -> Optional[str]:
+        """从指定 user.yaml 读取用户偏好方案"""
+        if not user_yaml.exists():
+            return None
+
+        try:
+            import yaml
+            with open(user_yaml, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if data and "var" in data:
+                return data["var"].get("previously_selected_schema")
+        except ImportError:
+            # 没有 PyYAML，用简单的正则解析
+            import re
+            try:
+                content = user_yaml.read_text(encoding="utf-8")
+                match = re.search(r"previously_selected_schema:\s*(\S+)", content)
+                if match:
+                    return match.group(1)
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.warning("读取 user.yaml 失败: %s", exc)
+
+        return None
+
+    def _get_preferred_rime_schema(self, user_data_dir: Path) -> Optional[str]:
+        """优先读取 vocotype 的 user.yaml，失败再回退 user_data_dir"""
+        vocotype_yaml = Path.home() / ".config" / "vocotype" / "rime" / "user.yaml"
+        preferred = self._read_schema_from_yaml(vocotype_yaml)
+        if preferred:
+            return preferred
+        return self._read_schema_from_yaml(user_data_dir / "user.yaml")
+
+    # 默认 schema：朙月拼音，librime 自带
+    DEFAULT_RIME_SCHEMA = "luna_pinyin"
+
     def _init_rime_session(self):
         """初始化 Rime Session（懒加载）"""
         if self._rime_session is not None:
@@ -157,9 +198,19 @@ class VoCoTypeEngine(IBus.Engine):
                 from pyrime.session import Session
                 from pyrime.ime import Context
 
-                # 使用 ibus-rime 的用户数据目录
-                user_data_dir = Path.home() / ".config" / "ibus" / "rime"
-                if not user_data_dir.exists():
+                # 优先使用 ibus-rime 用户目录，保证配置完整可用
+                vocotype_user_dir = Path.home() / ".config" / "vocotype" / "rime"
+                ibus_rime_user = Path.home() / ".config" / "ibus" / "rime"
+                user_data_dir = None
+                if (ibus_rime_user / "default.yaml").exists():
+                    user_data_dir = ibus_rime_user
+                elif (vocotype_user_dir / "default.yaml").exists():
+                    user_data_dir = vocotype_user_dir
+                else:
+                    logger.error("找不到可用的 Rime 配置目录（缺少 default.yaml）")
+                    return False
+
+                if user_data_dir == vocotype_user_dir and not user_data_dir.exists():
                     user_data_dir.mkdir(parents=True, exist_ok=True)
 
                 # 查找共享数据目录
@@ -172,6 +223,23 @@ class VoCoTypeEngine(IBus.Engine):
                     logger.error("找不到 Rime 共享数据目录")
                     return False
 
+                # 仅在使用 vocotype 目录时创建符号链接
+                if user_data_dir == vocotype_user_dir:
+                    for subdir in ["build", "lua", "cn_dicts", "en_dicts", "opencc", "others"]:
+                        link_path = user_data_dir / subdir
+                        if link_path.exists() or link_path.is_symlink():
+                            continue
+                        # 优先 ibus-rime 用户目录
+                        target_path = ibus_rime_user / subdir
+                        if not target_path.exists():
+                            target_path = shared_data_dir / subdir
+                        if target_path.exists():
+                            try:
+                                link_path.symlink_to(target_path)
+                                logger.debug("创建 %s 符号链接: %s -> %s", subdir, link_path, target_path)
+                            except OSError as e:
+                                logger.warning("创建 %s 符号链接失败: %s", subdir, e)
+
                 traits = Traits(
                     shared_data_dir=str(shared_data_dir),
                     user_data_dir=str(user_data_dir),
@@ -182,15 +250,65 @@ class VoCoTypeEngine(IBus.Engine):
                     app_name="rime.vocotype",
                 )
 
+                logger.info("Rime traits: shared=%s, user=%s, log=%s",
+                           shared_data_dir, user_data_dir, log_dir)
+
+                # 每个engine实例创建自己的session（避免共享状态问题）
                 api = API()
-                self._rime_session = Session(traits=traits, api=api)
-                logger.info("Rime Session 已创建，schema: %s", self._rime_session.get_current_schema())
+                logger.info("Rime API 创建 (addr=%s)，初始化中...", api.address)
+                api.setup(traits)
+                api.initialize(traits)
+                session_id = api.create_session()
+
+                # 跟踪活跃session（用于调试）
+                with self._session_lock:
+                    self._active_sessions.add(session_id)
+                    logger.info("Session ID: %s created, active sessions: %d",
+                               session_id, len(self._active_sessions))
+
+                # 创建 Session 对象
+                self._rime_session = Session(traits=traits, api=api, id=session_id)
+
+                # 获取当前schema（处理可能的编码问题）
+                try:
+                    schema = self._rime_session.get_current_schema()
+                    # 如果返回的是字节串，尝试解码
+                    if isinstance(schema, bytes):
+                        try:
+                            schema = schema.decode('utf-8')
+                        except UnicodeDecodeError:
+                            schema = schema.decode('gbk', errors='ignore')
+                    logger.info("Rime Session 已创建，schema: %s", schema)
+                except Exception as e:
+                    logger.warning("获取当前schema失败: %s，使用默认值", e)
+                    schema = None
+
+                # 避免调用 get_schema_list（部分环境可能触发 librime 崩溃）
+                preferred_schema = self._get_preferred_rime_schema(user_data_dir)
+                if preferred_schema:
+                    try:
+                        logger.info("尝试使用用户配置的方案: %s", preferred_schema)
+                        self._rime_session.select_schema(preferred_schema)
+                    except Exception as exc:
+                        logger.warning("选择用户方案失败: %s", exc)
+                elif schema in (None, "", ".default"):
+                    try:
+                        logger.info("使用默认方案: %s", self.DEFAULT_RIME_SCHEMA)
+                        self._rime_session.select_schema(self.DEFAULT_RIME_SCHEMA)
+                    except Exception as exc:
+                        logger.warning("选择默认方案失败: %s", exc)
+
+                try:
+                    logger.info("当前 schema: %s", self._rime_session.get_current_schema())
+                except Exception:
+                    pass
                 return True
 
             except Exception as exc:
                 logger.error("初始化 Rime Session 失败: %s", exc)
                 import traceback
                 traceback.print_exc()
+                self._rime_enabled = False  # Disable RIME on failure
                 return False
 
     def do_enable(self):
@@ -198,18 +316,65 @@ class VoCoTypeEngine(IBus.Engine):
         logger.info("Engine enabled")
 
     def do_disable(self):
-        """引擎禁用"""
+        """引擎禁用时清理资源（IBus不会调用do_destroy）"""
         logger.info("Engine disabled")
+
+        # 停止录音
         if self._is_recording:
             self._stop_recording()
-        # 清除 Rime 组合
+
+        # 清除UI
+        self._clear_preedit()
+        self.hide_lookup_table()
+
+        # 释放Rime session（因为IBus不会调用do_destroy）
         if self._rime_session:
             try:
                 self._rime_session.clear_composition()
+                session_id = self._rime_session.id
+                api = self._rime_session.api
+                api.destroy_session(session_id)
+
+                # 从活跃session中移除
+                with self._session_lock:
+                    self._active_sessions.discard(session_id)
+                    logger.info("Rime session %s released on disable, active sessions: %d",
+                               session_id, len(self._active_sessions))
+            except Exception as e:
+                logger.warning("Failed to release Rime session: %s", e)
+            self._rime_session = None
+            self._rime_enabled = self._rime_available  # 重置状态，下次启用时重新初始化
+
+    def do_destroy(self):
+        """引擎销毁时清理资源"""
+        logger.info("Engine destroying, cleaning up resources")
+
+        # 停止录音
+        if self._is_recording:
+            self._stop_recording()
+
+        # 关闭音频流
+        if self._stream:
+            try:
+                self._stream.close()
             except Exception:
                 pass
-        self._clear_preedit()
-        self.hide_lookup_table()
+
+        # 释放Rime session
+        if self._rime_session:
+            try:
+                session_id = self._rime_session.id
+                api = self._rime_session.api
+                api.destroy_session(session_id)
+
+                # 从活跃session中移除
+                with self._session_lock:
+                    self._active_sessions.discard(session_id)
+                    logger.info("Rime session %s destroyed, active sessions: %d",
+                               session_id, len(self._active_sessions))
+            except Exception as e:
+                logger.warning("Failed to destroy Rime session: %s", e)
+            self._rime_session = None
 
     def do_focus_in(self):
         """获得输入焦点"""
@@ -291,10 +456,12 @@ class VoCoTypeEngine(IBus.Engine):
     def _forward_key_to_rime(self, keyval, keycode, state) -> bool:
         """将按键事件转发给 Rime（使用 pyrime）"""
         if not self._rime_enabled:
+            logger.info("Rime 未启用，按键不处理")
             return False
 
         # 懒加载初始化 Rime
         if not self._init_rime_session():
+            logger.warning("Rime 初始化失败，按键不处理")
             return False
 
         try:
@@ -319,6 +486,7 @@ class VoCoTypeEngine(IBus.Engine):
 
             # 处理按键
             handled = self._rime_session.process_key(keyval, rime_mask)
+            logger.info("Rime process_key: keyval=%s mask=%s handled=%s", keyval, rime_mask, handled)
 
             # 检查是否有提交的文本
             commit = self._rime_session.get_commit()
@@ -348,7 +516,8 @@ class VoCoTypeEngine(IBus.Engine):
         """根据 Rime Context 更新 IBus UI"""
         try:
             # 更新预编辑文本
-            preedit_text = context.composition.preedit or ""
+            composition = getattr(context, "composition", None)
+            preedit_text = composition.preedit if composition and composition.preedit else ""
             if preedit_text:
                 ibus_text = IBus.Text.new_from_string(preedit_text)
                 # 添加下划线样式
@@ -358,13 +527,20 @@ class VoCoTypeEngine(IBus.Engine):
                     0,
                     len(preedit_text)
                 )
-                cursor_pos = context.composition.cursor_pos
+                cursor_pos = composition.cursor_pos if composition else len(preedit_text)
                 self.update_preedit_text(ibus_text, cursor_pos, True)
             else:
                 self._clear_preedit()
 
             # 更新候选词列表
-            menu = context.menu
+            menu = getattr(context, "menu", None)
+            if not menu or not getattr(menu, "candidates", None):
+                self.hide_lookup_table()
+                return
+
+            logger.debug("Rime menu: candidates=%d, page_size=%d, highlighted=%d",
+                        len(menu.candidates),
+                        menu.page_size, menu.highlighted_candidate_index)
             if menu.candidates:
                 lookup_table = IBus.LookupTable.new(
                     page_size=menu.page_size,
@@ -378,8 +554,10 @@ class VoCoTypeEngine(IBus.Engine):
                     if candidate.comment:
                         text = f"{text} {candidate.comment}"
                     lookup_table.append_candidate(IBus.Text.new_from_string(text))
+                    logger.debug("  候选 %d: %s", i, text)
 
                 self.update_lookup_table(lookup_table, True)
+                logger.debug("update_lookup_table called with %d candidates", len(menu.candidates))
             else:
                 self.hide_lookup_table()
 
