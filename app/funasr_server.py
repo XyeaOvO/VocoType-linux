@@ -15,6 +15,7 @@ import sys
 import warnings
 import time
 import threading
+import tempfile
 
 # 过滤掉 jieba 的 pkg_resources 弃用警告
 warnings.filterwarnings("ignore", category=UserWarning, module="jieba._compat")
@@ -401,6 +402,7 @@ class FunASRServer:
                 return {"success": False, "error": f"音频文件不存在: {audio_path}"}
 
             logger.info(f"开始转录音频文件: {audio_path}")
+            duration = self._get_audio_duration(audio_path)
 
             # 设置默认选项
             default_options = {
@@ -416,25 +418,90 @@ class FunASRServer:
                 default_options.update(options)
 
             # 执行语音识别（VAD 处理）
+            audio_path_for_asr = audio_path
+            tmp_vad_path = None
             if default_options["use_vad"] and self.vad_model:
                 # funasr_onnx.Fsmn_vad 直接调用，返回 segments [[start_ms, end_ms], ...]
                 vad_result = self.vad_model(audio_path)
-                logger.info("VAD处理完成，检测到 %s 个语音段", len(vad_result[0]) if vad_result else 0)
+                segments = []
+                if isinstance(vad_result, list) and vad_result:
+                    if isinstance(vad_result[0], list) and vad_result[0] and isinstance(vad_result[0][0], (list, tuple)):
+                        segments = vad_result[0]
+                    else:
+                        segments = vad_result
+                segment_count = len(segments)
+                logger.info("VAD处理完成，检测到 %s 个语音段", segment_count)
+                if segment_count == 0:
+                    self.transcription_count += 1
+                    if self.transcription_count % 10 == 0:
+                        self._cleanup_memory()
+                        logger.info(f"已完成 {self.transcription_count} 次转录，执行内存清理")
+                    return {
+                        "success": True,
+                        "text": "",
+                        "raw_text": "",
+                        "confidence": 0.0,
+                        "duration": duration,
+                        "language": "zh-CN",
+                        "model_type": (
+                            "onnx" if "onnx" in str(self.model_names.get("asr", "")).lower() else "pytorch"
+                        ),
+                        "models": self.model_names,
+                    }
+
+                try:
+                    import soundfile as sf
+                    import numpy as np
+
+                    audio_data, sample_rate = sf.read(audio_path, dtype="int16")
+                    if audio_data.ndim > 1:
+                        audio_data = audio_data[:, 0]
+
+                    slices = []
+                    for segment in segments:
+                        if not isinstance(segment, (list, tuple)) or len(segment) < 2:
+                            continue
+                        start_ms, end_ms = segment[0], segment[1]
+                        try:
+                            start_idx = max(0, int(float(start_ms) * sample_rate / 1000.0))
+                            end_idx = min(len(audio_data), int(float(end_ms) * sample_rate / 1000.0))
+                        except Exception:
+                            continue
+                        if end_idx > start_idx:
+                            slices.append(audio_data[start_idx:end_idx])
+
+                    if slices:
+                        trimmed = np.concatenate(slices)
+                        tmp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                        tmp_vad_path = tmp_file.name
+                        tmp_file.close()
+                        sf.write(tmp_vad_path, trimmed, sample_rate, subtype="PCM_16")
+                        audio_path_for_asr = tmp_vad_path
+                        logger.info("VAD裁剪完成，使用裁剪后的音频进行识别")
+                except Exception as exc:
+                    logger.warning("VAD裁剪失败，回退原始音频: %s", exc)
             elif default_options["use_vad"] and not self.vad_model:
                 logger.warning("use_vad=True 但VAD模型未加载，跳过VAD处理")
 
             # 执行ASR识别（根据模型类型使用不同接口）
-            if hasattr(self.asr_model, "generate"):
-                # PyTorch 模型使用 generate 方法
-                asr_result = self.asr_model.generate(
-                    input=audio_path,
-                    batch_size_s=default_options["batch_size_s"],
-                    hotword=default_options["hotword"],
-                    cache={},
-                )
-            else:
-                # ONNX 模型直接调用（funasr_onnx.Paraformer）
-                asr_result = self.asr_model([audio_path])
+            try:
+                if hasattr(self.asr_model, "generate"):
+                    # PyTorch 模型使用 generate 方法
+                    asr_result = self.asr_model.generate(
+                        input=audio_path_for_asr,
+                        batch_size_s=default_options["batch_size_s"],
+                        hotword=default_options["hotword"],
+                        cache={},
+                    )
+                else:
+                    # ONNX 模型直接调用（funasr_onnx.Paraformer）
+                    asr_result = self.asr_model([audio_path_for_asr])
+            finally:
+                if tmp_vad_path:
+                    try:
+                        os.remove(tmp_vad_path)
+                    except OSError:
+                        logger.debug("删除VAD临时文件失败: %s", tmp_vad_path)
 
             # 提取识别文本（兼容 PyTorch 和 ONNX 两种格式）
             if isinstance(asr_result, list) and len(asr_result) > 0:
@@ -470,18 +537,21 @@ class FunASRServer:
                 except Exception as e:
                     logger.warning(f"标点恢复失败，使用原始文本: {str(e)}")
 
-            duration = self._get_audio_duration(audio_path)
             self.transcription_count += 1
+
+            confidence = 0.0
+            if isinstance(asr_result, list) and asr_result:
+                first_item = asr_result[0]
+                if isinstance(first_item, dict):
+                    confidence = first_item.get("confidence", 0.0)
+                else:
+                    confidence = getattr(first_item, "confidence", 0.0)
 
             result = {
                 "success": True,
                 "text": final_text,
                 "raw_text": raw_text,
-                "confidence": (
-                    getattr(asr_result[0], "confidence", 0.0)
-                    if isinstance(asr_result, list)
-                    else 0.0
-                ),
+                "confidence": confidence,
                 "duration": duration,
                 "language": "zh-CN",
                 "model_type": (

@@ -12,6 +12,8 @@ import json
 import socket
 import logging
 import signal
+import stat
+import threading
 from pathlib import Path
 
 # 添加项目根目录到 path
@@ -32,6 +34,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 SOCKET_PATH = "/tmp/vocotype-fcitx5.sock"
+MAX_REQUEST_BYTES = 1024 * 1024
+REQUEST_TIMEOUT_S = 2.0
 
 
 class Fcitx5Backend:
@@ -62,10 +66,32 @@ class Fcitx5Backend:
 
         # 标记运行状态
         self.running = True
+        self._asr_lock = threading.Lock()
+        self._rime_lock = threading.Lock()
 
         # 注册信号处理
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _cleanup_socket_path(self, path: str) -> None:
+        """安全删除旧 socket 文件（避免误删普通文件）"""
+        if not os.path.exists(path):
+            return
+
+        try:
+            st = os.lstat(path)
+        except OSError as exc:
+            logger.warning("检查旧 socket 失败: %s", exc)
+            return
+
+        if stat.S_ISSOCK(st.st_mode) or stat.S_ISLNK(st.st_mode):
+            try:
+                os.remove(path)
+                logger.info("已移除旧 socket: %s", path)
+            except OSError as exc:
+                logger.warning("移除旧 socket 失败: %s", exc)
+        else:
+            raise RuntimeError(f"socket 路径已存在且不是 socket: {path}")
 
     def _signal_handler(self, signum, frame):
         """信号处理器"""
@@ -75,12 +101,13 @@ class Fcitx5Backend:
     def run(self):
         """运行 IPC 服务器"""
         # 删除旧的 socket 文件
-        if os.path.exists(SOCKET_PATH):
-            os.remove(SOCKET_PATH)
+        self._cleanup_socket_path(SOCKET_PATH)
 
         # 创建 Unix Socket
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(SOCKET_PATH)
+        os.chmod(SOCKET_PATH, 0o600)
         sock.listen(5)
         sock.settimeout(1.0)  # 设置超时以便处理信号
 
@@ -90,7 +117,12 @@ class Fcitx5Backend:
             while self.running:
                 try:
                     conn, _ = sock.accept()
-                    self.handle_client(conn)
+                    threading.Thread(
+                        target=self.handle_client,
+                        args=(conn,),
+                        daemon=True,
+                        name="Fcitx5BackendClient",
+                    ).start()
                 except socket.timeout:
                     continue
                 except Exception as exc:
@@ -98,8 +130,10 @@ class Fcitx5Backend:
                         logger.error("接受连接失败: %s", exc)
         finally:
             sock.close()
-            if os.path.exists(SOCKET_PATH):
-                os.remove(SOCKET_PATH)
+            try:
+                self._cleanup_socket_path(SOCKET_PATH)
+            except RuntimeError as exc:
+                logger.warning("清理 socket 失败: %s", exc)
             logger.info("Fcitx5 Backend 已停止")
 
     def handle_client(self, conn: socket.socket):
@@ -127,13 +161,20 @@ class Fcitx5Backend:
            -> {"pong": true}
         """
         try:
+            conn.settimeout(REQUEST_TIMEOUT_S)
             # 接收请求（读到 EOF）
             chunks = []
+            total_bytes = 0
             while True:
                 chunk = conn.recv(8192)
                 if not chunk:
                     break
                 chunks.append(chunk)
+                total_bytes += len(chunk)
+                if total_bytes > MAX_REQUEST_BYTES:
+                    response_str = json.dumps({"error": "Request too large"}, ensure_ascii=False)
+                    conn.sendall(response_str.encode('utf-8'))
+                    return
             if not chunks:
                 return
             data = b''.join(chunks).decode('utf-8')
@@ -150,7 +191,8 @@ class Fcitx5Backend:
                 if not audio_path:
                     response = {"success": False, "error": "缺少 audio_path 参数"}
                 else:
-                    result = self.asr_server.transcribe_audio(audio_path)
+                    with self._asr_lock:
+                        result = self.asr_server.transcribe_audio(audio_path)
                     response = result
 
             elif req_type == 'key_event':
@@ -160,12 +202,14 @@ class Fcitx5Backend:
                 if keyval is None:
                     response = {"handled": False, "error": "缺少 keyval 参数"}
                 else:
-                    result = self.rime_handler.process_key(keyval, mask)
+                    with self._rime_lock:
+                        result = self.rime_handler.process_key(keyval, mask)
                     response = result
 
             elif req_type == 'reset':
                 # 重置 Rime
-                self.rime_handler.reset()
+                with self._rime_lock:
+                    self.rime_handler.reset()
                 response = {"success": True}
 
             elif req_type == 'ping':
@@ -183,15 +227,29 @@ class Fcitx5Backend:
 
         except json.JSONDecodeError as exc:
             logger.error("JSON 解析失败: %s", exc)
-            error_response = json.dumps({"error": "Invalid JSON"})
-            conn.sendall(error_response.encode('utf-8'))
+            try:
+                error_response = json.dumps({"error": "Invalid JSON"})
+                conn.sendall(error_response.encode('utf-8'))
+            except Exception:
+                pass
+
+        except socket.timeout:
+            logger.warning("IPC 请求读取超时")
+            try:
+                error_response = json.dumps({"error": "Request timeout"})
+                conn.sendall(error_response.encode('utf-8'))
+            except Exception:
+                pass
 
         except Exception as exc:
             logger.error("处理请求失败: %s", exc)
             import traceback
             traceback.print_exc()
-            error_response = json.dumps({"error": str(exc)})
-            conn.sendall(error_response.encode('utf-8'))
+            try:
+                error_response = json.dumps({"error": str(exc)})
+                conn.sendall(error_response.encode('utf-8'))
+            except Exception:
+                pass
 
         finally:
             conn.close()

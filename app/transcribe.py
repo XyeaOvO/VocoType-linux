@@ -83,6 +83,7 @@ class TranscriptionWorker:
         self._transcription_queue: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(maxsize=10)
         self._transcription_thread: Optional[threading.Thread] = None
         self._transcription_running = threading.Event()
+        self._transcription_active = threading.Event()
         self._transcription_task_count = 0  # 已提交的任务计数
         self._transcription_completed_count = 0  # 已完成的任务计数
         
@@ -184,26 +185,31 @@ class TranscriptionWorker:
             try:
                 # 从队列获取音频数据（阻塞等待，超时1秒）
                 samples = self._transcription_queue.get(timeout=1.0)
-                
-                # None是停止信号
-                if samples is None:
-                    logger.debug("收到停止信号，转录工作线程退出")
-                    break
-                
-                # 执行转录
-                logger.info(f"开始处理转录任务 #{self._transcription_completed_count + 1}，队列剩余: {self._transcription_queue.qsize()}")
-                self._transcribe_once(samples)
-                self._transcription_completed_count += 1
-                
-                # 标记任务完成
-                self._transcription_queue.task_done()
-                
             except queue.Empty:
                 # 队列为空，继续等待
                 continue
+
+            # None是停止信号
+            if samples is None:
+                logger.debug("收到停止信号，转录工作线程退出")
+                self._transcription_queue.task_done()
+                break
+
+            # 执行转录
+            self._transcription_active.set()
+            logger.info(
+                "开始处理转录任务 #%s，队列剩余: %s",
+                self._transcription_completed_count + 1,
+                self._transcription_queue.qsize(),
+            )
+            try:
+                self._transcribe_once(samples)
             except Exception as exc:
-                logger.error(f"转录工作线程出错: {exc}", exc_info=True)
-                # 继续运行，不因单个任务失败而退出
+                logger.error("转录工作线程出错: %s", exc, exc_info=True)
+            finally:
+                self._transcription_active.clear()
+                self._transcription_completed_count += 1
+                self._transcription_queue.task_done()
         
         logger.info("转录工作线程已退出")
 
@@ -419,7 +425,7 @@ class TranscriptionWorker:
     @property
     def is_transcribing(self) -> bool:
         """是否有转录任务正在进行或等待中"""
-        return not self._transcription_queue.empty()
+        return self._transcription_active.is_set() or not self._transcription_queue.empty()
 
     @property
     def pending_transcriptions(self) -> int:
@@ -436,5 +442,3 @@ class TranscriptionWorker:
             "is_recording": self._running.is_set(),
             "is_transcribing": self.is_transcribing,
         }
-
-
