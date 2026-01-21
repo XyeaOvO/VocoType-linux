@@ -13,12 +13,13 @@
 
 ## 安装问题
 
-### Python版本必须是3.10-3.12
+### Python版本必须是3.11-3.12
 
-**重要**：VoCoType要求Python版本必须是3.10、3.11或3.12，**不支持Python 3.13及以上版本**。
+**重要**：VoCoType要求Python版本必须是3.11或3.12，**不支持Python 3.13及以上版本以及3.10及以下版本**。
 
 **为什么有这个限制**：
-VoCoType依赖的onnxruntime库目前只支持Python 3.10-3.12，不支持3.13+。
+VoCoType依赖的onnxruntime库目前只支持Python 3.11-3.12，不支持3.13+。  
+python 3.10版本的pyrime包版本太低了，没法成功调用librime，所以可用的最低版本是3.11
 
 **常见错误**：
 ```
@@ -71,7 +72,7 @@ source .venv/bin/activate
 ```bash
 # 激活虚拟环境后检查版本
 python --version
-# 应该显示 Python 3.10.x, 3.11.x 或 3.12.x
+# 应该显示 Python 3.11.x 或 3.12.x
 ```
 
 ---

@@ -5,6 +5,76 @@ All notable changes to VoCoType Linux IBus will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] - 2026-01-21
+
+### Fixed
+
+- **修复**：Ctrl+Space 无法切换 Rime ascii_mode 的问题
+  - **问题**：用户在 `default.custom.yaml` 中配置 `Ctrl+Space` 切换 `ascii_mode`，但在 VoCoType 中不生效
+  - **原因**：IBus 和 Fcitx5 后端错误地将 `Ctrl+Space` 作为输入法切换热键拦截，导致按键未传递给 Rime
+  - **解决**：移除 `Ctrl+Space` 拦截，仅保留 `Super+Space` 作为输入法切换热键，允许 Rime 按照用户配置处理 `Ctrl+Space`
+  - **影响范围**：IBus (`ibus/engine.py:574-579`) 和 Fcitx5 (`fcitx5/addon/vocotype.cpp:441-447`) 后端
+
+## [2.1.1] - 2026-01-20
+
+### Changed
+
+- **Python 版本要求调整**：
+  - 支持版本：Python 3.11–3.12
+  - **不再支持 Python 3.10**
+
+- **PyGObject 版本限制**：
+  - 限制为 `<3.51`，避免 Ubuntu 22.04 因缺少 `libgirepository-2` 导致安装失败
+
+- **安装脚本改进**：
+  - 项目/用户级虚拟环境优先使用 `uv` 工具
+  - 系统 Python 安装仅在用户明确选择时才遍历
+
+### Fixed
+
+- **修复**：Fcitx5 插件路径检测
+  - 补充 `/usr/lib/x86_64-linux-gnu/fcitx5` 路径（Ubuntu 系统修复）
+  - 确保在 Debian/Ubuntu 系统上正确检测插件目录
+
+### Documentation
+
+- **更新**：Debian/Ubuntu 依赖说明
+  - 说明 Ubuntu 22.04 的 librime/ibus-rime 版本偏旧
+  - 建议使用 Rime 功能时手动编译安装 librime + ibus-rime
+
+### Compatibility Notes
+
+- ⚠️ **不兼容变更**：不再支持 Python 3.10，请使用 Python 3.11 或 3.12
+- ⚠️ **Ubuntu 22.04**：若使用 Rime 功能，建议手动编译安装 librime + ibus-rime
+
+## [2.1.0]
+
+### Changed
+
+- **代码重构**：重整代码结构，提升可维护性
+- **功能增强**：增加输入方案选择功能
+
+### Fixed
+
+- **修复**：多个安装不稳定问题
+  - 提升安装成功率
+  - 改进依赖检测和安装流程
+
+## [2.0.0]
+
+### Added
+
+- **Fcitx5 支持**：新增 Fcitx5 输入法框架支持
+  - 项目从 `vocotype-ibus` 更名为 `vocotype-linux`
+  - 同时支持 IBus 和 Fcitx5 两种输入法框架
+  - 用户可根据系统环境选择对应的安装脚本
+
+### Changed
+
+- **项目更名**：`vocotype-ibus` → `vocotype-linux`
+  - 反映多框架支持的定位
+  - 更广泛的 Linux 桌面环境兼容性
+
 ## [1.1.0] - 2026-01-02
 
 ### Added
