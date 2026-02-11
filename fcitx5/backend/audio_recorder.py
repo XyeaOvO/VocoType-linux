@@ -11,19 +11,31 @@
 """
 from __future__ import annotations
 
-import sys
 import argparse
 import tempfile
 import queue
 import threading
 import logging
+import sys
 from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 
 # 添加项目根目录到 path
-PROJECT_ROOT = Path(__file__).parent.parent.parent
+# 兼容两种布局：
+# 1) 源码运行: <repo>/fcitx5/backend/audio_recorder.py -> root=<repo>
+# 2) 安装运行: ~/.local/share/vocotype-fcitx5/backend/audio_recorder.py -> root=~/.local/share/vocotype-fcitx5
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = None
+for candidate in (SCRIPT_DIR.parent, SCRIPT_DIR.parent.parent.parent):
+    if (candidate / "app").is_dir():
+        PROJECT_ROOT = candidate
+        break
+
+if PROJECT_ROOT is None:
+    PROJECT_ROOT = SCRIPT_DIR.parent
+
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.audio_utils import load_audio_config, resample_audio, SAMPLE_RATE

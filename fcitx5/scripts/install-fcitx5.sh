@@ -157,14 +157,35 @@ echo ""
 echo "[4/9] 安装 C++ Addon..."
 make install
 
-# 复制到 lib 目录（某些 Fcitx5 配置可能需要）
-mkdir -p "$HOME/.local/lib/fcitx5"
-cp "$HOME/.local/lib64/fcitx5/vocotype.so" "$HOME/.local/lib/fcitx5/" 2>/dev/null || \
-cp "$PROJECT_DIR/fcitx5/addon/build/vocotype.so" "$HOME/.local/lib/fcitx5/"
+# 兼容不同发行版的 libdir（lib / lib64）
+ADDON_LIB_DIR=""
+for dir in "$HOME/.local/lib64/fcitx5" "$HOME/.local/lib/fcitx5"; do
+    if [ -f "$dir/vocotype.so" ]; then
+        ADDON_LIB_DIR="$dir"
+        break
+    fi
+done
 
-# 创建 lib 前缀的符号链接（兼容性）
-cd "$HOME/.local/lib64/fcitx5" && ln -sf vocotype.so libvocotype.so 2>/dev/null || true
-cd "$HOME/.local/lib/fcitx5" && ln -sf vocotype.so libvocotype.so 2>/dev/null || true
+# 如果 make install 未安装到预期目录，回退到 build 产物
+if [ -z "$ADDON_LIB_DIR" ]; then
+    ADDON_LIB_DIR="$HOME/.local/lib/fcitx5"
+    mkdir -p "$ADDON_LIB_DIR"
+    cp "$PROJECT_DIR/fcitx5/addon/build/vocotype.so" "$ADDON_LIB_DIR/"
+fi
+
+# 在主安装目录创建 lib 前缀符号链接（兼容性）
+ln -sf vocotype.so "$ADDON_LIB_DIR/libvocotype.so"
+
+# 同步到另一个常见目录，减少不同发行版搜索路径差异
+if [ "$ADDON_LIB_DIR" = "$HOME/.local/lib64/fcitx5" ]; then
+    mkdir -p "$HOME/.local/lib/fcitx5"
+    cp "$ADDON_LIB_DIR/vocotype.so" "$HOME/.local/lib/fcitx5/"
+    ln -sf vocotype.so "$HOME/.local/lib/fcitx5/libvocotype.so"
+elif [ "$ADDON_LIB_DIR" = "$HOME/.local/lib/fcitx5" ]; then
+    mkdir -p "$HOME/.local/lib64/fcitx5"
+    cp "$ADDON_LIB_DIR/vocotype.so" "$HOME/.local/lib64/fcitx5/"
+    ln -sf vocotype.so "$HOME/.local/lib64/fcitx5/libvocotype.so"
+fi
 
 # 安装 Addon 配置文件
 mkdir -p "$HOME/.local/share/fcitx5/addon"
@@ -184,7 +205,8 @@ echo "✓ C++ Addon 已安装"
 echo ""
 echo "[5/9] 配置环境变量..."
 mkdir -p "$HOME/.config/environment.d"
-cat > "$HOME/.config/environment.d/fcitx5-vocotype.conf" << 'EOF'
+# 注意：environment.d 中不使用 $HOME 字面量，直接写绝对路径，避免会话中不展开
+cat > "$HOME/.config/environment.d/fcitx5-vocotype.conf" << EOF
 FCITX_ADDON_DIRS=$HOME/.local/lib64/fcitx5:$HOME/.local/lib/fcitx5:/usr/lib64/fcitx5:/usr/lib/x86_64-linux-gnu/fcitx5:/usr/lib/fcitx5
 EOF
 echo "✓ 环境变量已配置"
@@ -270,13 +292,34 @@ if command -v uv &>/dev/null; then
     echo "使用 uv 安装依赖..."
     cd "$PROJECT_DIR"
     uv pip install -r requirements.txt --python "$VENV_PYTHON"
-    uv pip install -e ".[full]" --python "$VENV_PYTHON"
 else
     echo "使用 pip 安装依赖..."
     "$VENV_PYTHON" -m pip install --upgrade pip
     "$VENV_PYTHON" -m pip install -r "$PROJECT_DIR/requirements.txt"
-    cd "$PROJECT_DIR"
-    "$VENV_PYTHON" -m pip install -e ".[full]"
+fi
+
+# pyrime 依赖 librime 开发包，按可选能力安装，不阻塞主安装流程
+echo "尝试安装可选依赖 pyrime（用于 Rime 拼音）..."
+if pkg-config --exists rime 2>/dev/null; then
+    if command -v uv &>/dev/null; then
+        if uv pip install pyrime --python "$VENV_PYTHON"; then
+            echo "✓ pyrime 安装成功"
+        else
+            echo "⚠️  pyrime 安装失败，将继续以纯语音模式运行"
+        fi
+    else
+        if "$VENV_PYTHON" -m pip install pyrime; then
+            echo "✓ pyrime 安装成功"
+        else
+            echo "⚠️  pyrime 安装失败，将继续以纯语音模式运行"
+        fi
+    fi
+else
+    echo "⚠️  未检测到 librime 开发库（pkg-config: rime），跳过 pyrime 安装"
+    echo "   如需启用 Rime 拼音，可先安装系统包后重试："
+    echo "   Debian/Ubuntu: sudo apt install librime-dev"
+    echo "   Fedora:        sudo dnf install librime-devel"
+    echo "   Arch:          sudo pacman -S librime"
 fi
 
 echo "✓ Python 环境已配置"
@@ -401,7 +444,9 @@ if [ -d "$FCITX_RIME_USER" ]; then
                 echo "  [0] 使用默认 luna_pinyin"
                 echo ""
 
-                read -r -p "请输入方案编号 (默认 1): " SCHEMA_CHOICE
+                if ! read -r -p "请输入方案编号 (默认 1): " SCHEMA_CHOICE; then
+                    SCHEMA_CHOICE=""
+                fi
 
                 if [ "$SCHEMA_CHOICE" = "n" ] || [ "$SCHEMA_CHOICE" = "N" ]; then
                     if [ $((PAGE + 1)) -lt $TOTAL_PAGES ]; then
@@ -573,7 +618,7 @@ echo "   方式 A - 重新登录（推荐）"
 echo "     注销并重新登录桌面会话"
 echo ""
 echo "   方式 B - 当前终端临时设置"
-echo "     export FCITX_ADDON_DIRS=~/.local/lib64/fcitx5:~/.local/lib/fcitx5:/usr/lib64/fcitx5"
+echo "     export FCITX_ADDON_DIRS=~/.local/lib64/fcitx5:~/.local/lib/fcitx5:/usr/lib64/fcitx5:/usr/lib/x86_64-linux-gnu/fcitx5:/usr/lib/fcitx5"
 echo ""
 echo "2. 启动后台服务："
 echo ""

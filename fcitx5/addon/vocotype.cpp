@@ -62,6 +62,7 @@ constexpr int PTT_KEYVAL = FcitxKey_F9;
 VoCoTypeAddon::VoCoTypeAddon(fcitx::Instance* instance)
     : instance_(instance),
       ipc_client_(std::make_unique<IPCClient>("/tmp/vocotype-fcitx5.sock")) {
+    dispatcher_.attach(&instance_->eventLoop());
 
     // 获取安装路径
     const char* home = std::getenv("HOME");
@@ -94,6 +95,7 @@ VoCoTypeAddon::~VoCoTypeAddon() {
         recorder_stdout_ = nullptr;
         is_recording_ = false;
     }
+    dispatcher_.detach();
     FCITX_INFO() << "VoCoType Addon destroyed";
 }
 
@@ -102,8 +104,8 @@ std::vector<fcitx::InputMethodEntry> VoCoTypeAddon::listInputMethods() {
 
     auto entry = fcitx::InputMethodEntry("vocotype", "VoCoType", "zh_CN", "vocotype");
     entry.setNativeName("语音输入");
-    entry.setIcon("microphone");
-    entry.setLabel("🎤");
+    entry.setIcon("audio-input-microphone");
+    entry.setLabel("VO");
 
     result.push_back(std::move(entry));
     return result;
@@ -326,13 +328,12 @@ void VoCoTypeAddon::stopRecording(fcitx::InputContext* ic, bool transcribe) {
         std::string audio_path = stopRecorderProcess(pid, stdin_fd, stdout_file);
         if (audio_path.empty()) {
             if (transcribe) {
-                instance_->eventDispatcher().scheduleWithContext(
-                    ic_ref, [this, ic_ref]() {
-                        auto* ic_ptr = ic_ref.get();
-                        if (ic_ptr) {
-                            showError(ic_ptr, "录音失败");
-                        }
-                    });
+                dispatcher_.schedule([this, ic_ref]() {
+                    auto* ic_ptr = ic_ref.get();
+                    if (ic_ptr) {
+                        showError(ic_ptr, "录音失败");
+                    }
+                });
             }
             return;
         }
@@ -345,21 +346,19 @@ void VoCoTypeAddon::stopRecording(fcitx::InputContext* ic, bool transcribe) {
         TranscribeResult result = ipc_client_->transcribeAudio(audio_path);
         std::remove(audio_path.c_str());
 
-        instance_->eventDispatcher().scheduleWithContext(
-            ic_ref, [this, ic_ref, result]() {
-                auto* ic_ptr = ic_ref.get();
-                if (!ic_ptr) {
-                    return;
-                }
-                if (result.success && !result.text.empty()) {
-                    commitText(ic_ptr, result.text);
-                } else if (!result.success) {
-                    showError(ic_ptr,
-                              result.error.empty() ? "转录失败" : result.error);
-                } else {
-                    clearUI(ic_ptr);
-                }
-            });
+        dispatcher_.schedule([this, ic_ref, result]() {
+            auto* ic_ptr = ic_ref.get();
+            if (!ic_ptr) {
+                return;
+            }
+            if (result.success && !result.text.empty()) {
+                commitText(ic_ptr, result.text);
+            } else if (!result.success) {
+                showError(ic_ptr, result.error.empty() ? "转录失败" : result.error);
+            } else {
+                clearUI(ic_ptr);
+            }
+        });
     }).detach();
 
     FCITX_INFO() << "Recording stopped";
